@@ -14,20 +14,18 @@ from fontTools.cffLib import (
 	FontDict,
 	VarStoreData
 )
-from fontTools.cffLib.specializer import (commandsToProgram, specializeCommands)
+from fontTools.cffLib.specializer import (specializeCommands)
 from fontTools.ttLib import newTable
 from fontTools import varLib
 from fontTools.varLib.models import allEqual
 
 
-def addCFFVarStore(varFont, varModel):
+def addCFFVarStore(varFont, varModel, var_data_list):
 	supports = varModel.supports[1:]
 	fvarTable = varFont['fvar']
 	axisKeys = [axis.axisTag for axis in fvarTable.axes]
 	varTupleList = varLib.builder.buildVarRegionList(supports, axisKeys)
-	varTupleIndexes = list(range(len(supports)))
-	varDeltasCFFV = varLib.builder.buildVarData(varTupleIndexes, None, False)
-	varStoreCFFV = varLib.builder.buildVarStore(varTupleList, [varDeltasCFFV])
+	varStoreCFFV = varLib.builder.buildVarStore(varTupleList, var_data_list)
 
 	topDict = varFont['CFF2'].cff.topDictIndex[0]
 	topDict.VarStore = VarStoreData(otVarStore=varStoreCFFV)
@@ -143,7 +141,9 @@ pd_blend_fields = ("BlueValues", "OtherBlues", "FamilyBlues",
 				   "StemSnapV")
 
 
-def merge_PrivateDicts(topDict, region_top_dicts, num_masters, var_model):
+def merge_PrivateDicts(top_dicts, num_masters, var_model):
+	topDict = top_dicts[0]
+	region_top_dicts = top_dicts[1:]
 	if hasattr(region_top_dicts[0], 'FDArray'):
 		regionFDArrays = [fdTopDict.FDArray for fdTopDict in region_top_dicts]
 	else:
@@ -214,38 +214,75 @@ def merge_PrivateDicts(topDict, region_top_dicts, num_masters, var_model):
 
 def merge_region_fonts(varFont, model, ordered_fonts_list, glyphOrder):
 	topDict = varFont['CFF2'].cff.topDictIndex[0]
-	default_charstrings = topDict.CharStrings
-	region_fonts = ordered_fonts_list[1:]
-	region_top_dicts = [
-			ttFont['CFF '].cff.topDictIndex[0] for ttFont in region_fonts
+	top_dicts = [topDict] + [
+			ttFont['CFF '].cff.topDictIndex[0]
+			for ttFont in ordered_fonts_list[1:]
 				]
 	num_masters = len(model.mapping)
-	merge_PrivateDicts(topDict, region_top_dicts, num_masters, model)
-	merge_charstrings(default_charstrings,
-					  glyphOrder,
+	merge_PrivateDicts(top_dicts, num_masters, model)
+	var_data_list = merge_charstrings(glyphOrder,
 					  num_masters,
-					  region_top_dicts, model)
+					  top_dicts, model)
+	addCFFVarStore(varFont, model, var_data_list)
 
 
-def merge_charstrings(default_charstrings,
-					  glyphOrder,
+def _get_cs(glyphOrder, charstrings, glyphName):
+	if glyphName not in charstrings:
+		return None
+	return charstrings[glyphName]
+
+
+def merge_charstrings(glyphOrder,
 					  num_masters,
-					  region_top_dicts,
-					  var_model):
+					  top_dicts,
+					  masterModel):
+
+	vsindex_dict = {}
+	var_data_list = []
+	default_charstrings = top_dicts[0].CharStrings
 	for gname in glyphOrder:
-		default_charstring = default_charstrings[gname]
+		all_cs = [_get_cs(glyphOrder, td.CharStrings, gname)
+			for td in top_dicts]
+		model, all_cs = masterModel.getSubModel(all_cs)
+
+		# create the first pass CFF2 charstring, from
+		# the default charstring.
+		default_charstring = all_cs[0]
 		var_pen = CFF2CharStringMergePen([], gname, num_masters, 0)
 		default_charstring.draw(var_pen)
-		for region_idx, region_td in enumerate(region_top_dicts, start=1):
-			region_charstrings = region_td.CharStrings
-			region_charstring = region_charstrings[gname]
+
+		# Add the coordinates from all the other regions to the
+		# blend lists in the CFF2 charstring.
+		all_cs = all_cs[1:]
+		for region_idx, region_charstring in enumerate(all_cs, start=1):
 			var_pen.restart(region_idx)
 			region_charstring.draw(var_pen)
-		new_charstring = var_pen.getCharString(
+
+		# Collapse each coordinate list to a blend operator and its args.
+		new_cs = var_pen.getCharString(
 			private=default_charstring.private,
 			globalSubrs=default_charstring.globalSubrs,
-			var_model=var_model, optimize=True)
-		default_charstrings[gname] = new_charstring
+			var_model=model, optimize=True)
+		default_charstrings[gname] = new_cs
+
+		# If the charstring required a new model, create
+		# a VarData table to go with, and set vsindex.
+		try:
+			key = tuple(v is not None for v in all_cs)
+			vsindex = vsindex_dict[key]
+		except KeyError:
+			varTupleIndexes = list(range(len(model.supports[1:])))
+			var_data = varLib.builder.buildVarData(varTupleIndexes, None, False)
+			vsindex = len(vsindex_dict)
+			vsindex_dict[key] = vsindex
+			var_data_list.append(var_data)
+		# We do not need to check for an existing new_cs.private.vsindex,
+		# as we know it doesn't exist yet.
+		if vsindex != 0:
+			new_cs.program[:0] = [vsindex, 'vsindex']
+
+	# XXX To do: optimize use of vsindex between the PrivateDicts and the charstrings.
+	return var_data_list
 
 
 class MergeTypeError(TypeError):
@@ -454,10 +491,6 @@ class CFF2CharStringMergePen(T2CharStringPen):
 						program.append(arg[0])
 					for arg in blendlist:
 						# for each coordinate tuple, append the region deltas
-						if len(arg) != 3:
-							print(arg)
-							import pdb
-							pdb.set_trace()
 						deltas = var_model.getDeltas(arg)
 						if round_func:
 							deltas = [round_func(delta) for delta in deltas]
@@ -470,7 +503,6 @@ class CFF2CharStringMergePen(T2CharStringPen):
 			if op:
 				program.append(op)
 		return program
-
 
 	def getCharString(self, private=None, globalSubrs=None,
 					  var_model=None, optimize=True):

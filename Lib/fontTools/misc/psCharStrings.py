@@ -446,8 +446,9 @@ t1Operators = [
 
 class T2WidthExtractor(SimpleT2Decompiler):
 
-	def __init__(self, localSubrs, globalSubrs, nominalWidthX, defaultWidthX):
-		SimpleT2Decompiler.__init__(self, localSubrs, globalSubrs)
+	def __init__(self, localSubrs, globalSubrs,
+					nominalWidthX, defaultWidthX, private=None):
+		SimpleT2Decompiler.__init__(self, localSubrs, globalSubrs, private)
 		self.nominalWidthX = nominalWidthX
 		self.defaultWidthX = defaultWidthX
 
@@ -486,9 +487,11 @@ class T2WidthExtractor(SimpleT2Decompiler):
 
 class T2OutlineExtractor(T2WidthExtractor):
 
-	def __init__(self, pen, localSubrs, globalSubrs, nominalWidthX, defaultWidthX):
+	def __init__(self, pen, localSubrs, globalSubrs,
+					nominalWidthX, defaultWidthX, private=None):
 		T2WidthExtractor.__init__(
-			self, localSubrs, globalSubrs, nominalWidthX, defaultWidthX)
+			self, localSubrs, globalSubrs,
+			nominalWidthX, defaultWidthX, private)
 		self.pen = pen
 
 	def reset(self):
@@ -945,6 +948,22 @@ class T2CharString(object):
 		else:
 			return "<%s (bytecode) at %x>" % (self.__class__.__name__, id(self))
 
+	def __getattr__(self, name):
+		if name == 'vsindex':
+			pd = self.private
+			if not pd:
+				return None
+			
+			if self.needsDecompilation():
+				self.decompile()
+			default_vsindex = pd.vsindex  if hasattr(pd, 'vsindex') else 0
+			if self.program[1] == 'vsindex':
+				vsindex = self.program[0]
+			else:
+				vsindex = default_vsindex
+			return vsindex
+		raise AttributeError 
+
 	def getIntEncoder(self):
 		return encodeIntT2
 
@@ -961,7 +980,8 @@ class T2CharString(object):
 	def draw(self, pen):
 		subrs = getattr(self.private, "Subrs", [])
 		extractor = self.outlineExtractor(pen, subrs, self.globalSubrs,
-				self.private.nominalWidthX, self.private.defaultWidthX)
+				self.private.nominalWidthX, self.private.defaultWidthX,
+				self.private)
 		extractor.execute(self)
 		self.width = extractor.width
 
