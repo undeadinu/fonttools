@@ -141,7 +141,6 @@ def subset_glyphs(self, s):
 @_add_method(psCharStrings.T2CharString)
 def subset_subroutines(self, subrs, gsubrs):
 	p = self.program
-	assert len(p)
 	for i in range(1, len(p)):
 		if p[i] == 'callsubr':
 			assert isinstance(p[i-1], int)
@@ -168,6 +167,8 @@ def drop_hints(self):
 		if hasattr(self, 'width'):
 			# Insert width back if needed
 			if self.width != self.private.defaultWidthX:
+				# For CFF2 charstrings, this should never happen
+				assert self.private.defaultWidthX is not None, "CFF2 CharStrings must not have an initial width value"
 				self.program.insert(0, self.width - self.private.nominalWidthX)
 
 	if hints.has_hintmask:

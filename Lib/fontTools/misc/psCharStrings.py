@@ -407,7 +407,7 @@ class SimpleT2Decompiler(object):
 		numBlends = self.pop()
 		numOps = numBlends * (self.numRegions + 1)
 		blendArgs = self.operandStack[-numOps:]
-		del self.operandStack[:-(numOps-numBlends)] # Leave the default operands on the stack.
+		del self.operandStack[-(numOps-numBlends):] # Leave the default operands on the stack.
 
 	def op_vsindex(self, index):
 		vi = self.pop()
@@ -461,6 +461,8 @@ class T2WidthExtractor(SimpleT2Decompiler):
 		args = self.popall()
 		if not self.gotWidth:
 			if evenOdd ^ (len(args) % 2):
+				# For CFF2 charstrings, this should never happen
+				assert self.defaultWidthX is not None, "CFF2 CharStrings must not have an initial width value"
 				self.width = self.nominalWidthX + args[0]
 				args = args[1:]
 			else:
@@ -690,12 +692,6 @@ class T2OutlineExtractor(T2WidthExtractor):
 			dy6 = d6
 		self.rCurveTo((dx1, dy1), (dx2, dy2), (dx3, dy3))
 		self.rCurveTo((dx4, dy4), (dx5, dy5), (dx6, dy6))
-
-	#
-	# MultipleMaster. Well...
-	#
-	def op_blend(self, index):
-		self.popall()
 
 	# misc
 	def op_and(self, index):
