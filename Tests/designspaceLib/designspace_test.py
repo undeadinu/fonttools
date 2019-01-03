@@ -4,6 +4,7 @@ from __future__ import (print_function, division, absolute_import,
                         unicode_literals)
 
 import os
+import sys
 import pytest
 import warnings
 
@@ -785,3 +786,64 @@ def test_documentLib(tmpdir):
     assert dummyKey in new.lib
     assert new.lib[dummyKey] == dummyData
 
+
+def test_updatePaths(tmpdir):
+    doc = DesignSpaceDocument()
+    doc.path = str(tmpdir / "foo" / "bar" / "MyDesignspace.designspace")
+
+    s1 = SourceDescriptor()
+    doc.addSource(s1)
+
+    doc.updatePaths()
+
+    # expect no changes
+    assert s1.path is None
+    assert s1.filename is None
+
+    name1 = "../masters/Source1.ufo"
+    path1 = posix(str(tmpdir / "foo" / "masters" / "Source1.ufo"))
+
+    s1.path = path1
+    s1.filename = None
+
+    doc.updatePaths()
+
+    assert s1.path == path1
+    assert s1.filename == name1  # empty filename updated
+
+    name2 = "../masters/Source2.ufo"
+    s1.filename = name2
+
+    doc.updatePaths()
+
+    # conflicting filename discarded, path always gets precedence
+    assert s1.path == path1
+    assert s1.filename == "../masters/Source1.ufo"
+
+    s1.path = None
+    s1.filename = name2
+
+    doc.updatePaths()
+
+    # expect no changes
+    assert s1.path is None
+    assert s1.filename == name2
+
+
+@pytest.mark.skipif(sys.version_info[:2] < (3, 6), reason="pathlib is only tested on 3.6 and up")
+def test_read_with_path_object():
+    import pathlib
+    source = (pathlib.Path(__file__) / "../data/test.designspace").resolve()
+    assert source.exists()
+    doc = DesignSpaceDocument()
+    doc.read(source)
+
+
+@pytest.mark.skipif(sys.version_info[:2] < (3, 6), reason="pathlib is only tested on 3.6 and up")
+def test_with_with_path_object(tmpdir):
+    import pathlib
+    tmpdir = str(tmpdir)
+    dest = pathlib.Path(tmpdir) / "test.designspace"
+    doc = DesignSpaceDocument()
+    doc.write(dest)
+    assert dest.exists()
