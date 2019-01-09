@@ -20,11 +20,11 @@ from fontTools import varLib
 from fontTools.varLib.models import allEqual
 
 
-def addCFFVarStore(varFont, varModel, var_data_list):
+def addCFFVarStore(varFont, varModel, var_data_list, master_supports):
 	supports = varModel.supports[1:]
 	fvarTable = varFont['fvar']
 	axisKeys = [axis.axisTag for axis in fvarTable.axes]
-	varTupleList = varLib.builder.buildVarRegionList(supports, axisKeys)
+	varTupleList = varLib.builder.buildVarRegionList(master_supports, axisKeys)
 	varStoreCFFV = varLib.builder.buildVarStore(varTupleList, var_data_list)
 
 	topDict = varFont['CFF2'].cff.topDictIndex[0]
@@ -141,7 +141,21 @@ pd_blend_fields = ("BlueValues", "OtherBlues", "FamilyBlues",
 				   "StemSnapV")
 
 
-def merge_PrivateDicts(top_dicts, num_masters, var_model):
+def merge_PrivateDicts(top_dicts, model_keys, var_model):
+	"""
+	I step through the FontDicts in the FDArray of the varfont TopDict.
+	For each varfont FontDict:
+		step through each key in FontDict.Private.
+		For each key, step through each relevant source font Private dict, and
+		build a list of values to blend.
+	The 'relevant' source fonts are selected by first getting the right
+	submodel using model_keys[vsindex]. The indices of the
+	subModel.locations are mapped to source font list indices by
+	assuming the latter order is the same as the order of the
+	var_model.locations. I can then get the index of each subModel
+	location in the list of var_model.locations.
+	"""
+			
 	topDict = top_dicts[0]
 	region_top_dicts = top_dicts[1:]
 	if hasattr(region_top_dicts[0], 'FDArray'):
@@ -150,9 +164,19 @@ def merge_PrivateDicts(top_dicts, num_masters, var_model):
 		regionFDArrays = [[fdTopDict] for fdTopDict in region_top_dicts]
 	for fd_index, font_dict in enumerate(topDict.FDArray):
 		private_dict = font_dict.Private
+		vsindex = getattr(private_dict, 'vsindex', 0)
+		# At the moment, no PrivateDict has a vsindex key, but let's support
+		# how it should work. See comment at end of
+		# merge_charstrings() - still need to optimize use of vsindex.
+		sub_model, _t = var_model.getSubModel(model_keys[vsindex])
+		master_indices = []
+		for loc in sub_model.locations[1:]:
+			i = var_model.locations.index(loc) -1
+			master_indices.append(i)
 		pds = [private_dict] + [
-			regionFDArray[fd_index].Private for regionFDArray in regionFDArrays
+			regionFDArrays[i][fd_index].Private for i in master_indices
 			]
+		num_masters = len(pds)
 		for key, value in private_dict.rawDict.items():
 			if key not in pd_blend_fields:
 				continue
@@ -192,7 +216,7 @@ def merge_PrivateDicts(top_dicts, num_masters, var_model):
 					if (not any_points_differ) and not allEqual(rel_list):
 						any_points_differ = True
 					prev_val_list = val_list
-					deltas = var_model.getDeltas(rel_list)
+					deltas = sub_model.getDeltas(rel_list)
 					# Convert numbers with no decimal part to an int.
 					deltas = [conv_to_int(delta) for delta in deltas]
 					# For PrivateDict BlueValues, the default font
@@ -206,7 +230,7 @@ def merge_PrivateDicts(top_dicts, num_masters, var_model):
 			else:
 				values = [pd.rawDict[key] for pd in pds]
 				if not allEqual(values):
-					dataList = var_model.getDeltas(values)
+					dataList = sub_model.getDeltas(values)
 				else:
 					dataList = values[0]
 			private_dict.rawDict[key] = dataList
@@ -219,11 +243,12 @@ def merge_region_fonts(varFont, model, ordered_fonts_list, glyphOrder):
 			for ttFont in ordered_fonts_list[1:]
 				]
 	num_masters = len(model.mapping)
-	merge_PrivateDicts(top_dicts, num_masters, model)
-	var_data_list = merge_charstrings(glyphOrder,
-					  num_masters,
-					  top_dicts, model)
-	addCFFVarStore(varFont, model, var_data_list)
+	(var_data_list, master_supports, 
+		model_key_list) = merge_charstrings(glyphOrder,
+											  num_masters,
+											  top_dicts, model)
+	merge_PrivateDicts(top_dicts, model_key_list, model)
+	addCFFVarStore(varFont, model, var_data_list, master_supports)
 
 
 def _get_cs(glyphOrder, charstrings, glyphName):
@@ -239,23 +264,26 @@ def merge_charstrings(glyphOrder,
 
 	vsindex_dict = {}
 	var_data_list = []
+	master_supports = []
 	default_charstrings = top_dicts[0].CharStrings
 	for gname in glyphOrder:
 		all_cs = [_get_cs(glyphOrder, td.CharStrings, gname)
 			for td in top_dicts]
-		model, all_cs = masterModel.getSubModel(all_cs)
+		if len([gs for gs in all_cs if gs != None]) == 1:
+			continue
+		model, model_cs = masterModel.getSubModel(all_cs)
 
 		# create the first pass CFF2 charstring, from
 		# the default charstring.
-		default_charstring = all_cs[0]
+		default_charstring = model_cs[0]
 		var_pen = CFF2CharStringMergePen([], gname, num_masters, 0)
 		default_charstring.outlineExtractor = CFFToCFF2OutlineExtractor
 		default_charstring.draw(var_pen)
 
 		# Add the coordinates from all the other regions to the
 		# blend lists in the CFF2 charstring.
-		all_cs = all_cs[1:]
-		for region_idx, region_charstring in enumerate(all_cs, start=1):
+		region_cs = model_cs[1:]
+		for region_idx, region_charstring in enumerate(region_cs, start=1):
 			var_pen.restart(region_idx)
 			region_charstring.draw(var_pen)
 
@@ -272,7 +300,11 @@ def merge_charstrings(glyphOrder,
 			key = tuple(v is not None for v in all_cs)
 			vsindex = vsindex_dict[key]
 		except KeyError:
-			varTupleIndexes = list(range(len(model.supports[1:])))
+			varTupleIndexes = []
+			for support in model.supports[1:]:
+				if not support in master_supports:
+					master_supports.append(support)
+				varTupleIndexes.append(master_supports.index(support))
 			var_data = varLib.builder.buildVarData(varTupleIndexes, None, False)
 			vsindex = len(vsindex_dict)
 			vsindex_dict[key] = vsindex
@@ -283,7 +315,10 @@ def merge_charstrings(glyphOrder,
 			new_cs.program[:0] = [vsindex, 'vsindex']
 
 	# XXX To do: optimize use of vsindex between the PrivateDicts and the charstrings.
-	return var_data_list
+	
+	model_key_list = list(vsindex_dict.keys())
+	# As of Python 3.7, dict key order is guaranteed to be same as added order.
+	return var_data_list, master_supports, model_key_list
 
 
 class MergeTypeError(TypeError):
@@ -329,11 +364,11 @@ class CFF2CharStringMergePen(T2CharStringPen):
 	"""Pen to merge Type 2 CharStrings.
 	"""
 	def __init__(self, default_commands,
-				 glyphName, num_masters, master_idx, roundTolerance=0.5):
+				 glyphName, num_masters, master_idx, roundTolerance=0.5, CFF2=True):
 		super(
 			CFF2CharStringMergePen,
 			self).__init__(width=None,
-						   glyphSet=None, CFF2=True,
+						   glyphSet=None, CFF2=CFF2,
 						   roundTolerance=roundTolerance)
 		self.pt_index = 0
 		self._commands = default_commands
@@ -343,40 +378,23 @@ class CFF2CharStringMergePen(T2CharStringPen):
 		self.glyphName = glyphName
 		self.roundNumber = makeRoundNumberFunc(roundTolerance)
 
-	def _p(self, pt):
-		""" Unlike T2CharstringPen, this class stores absolute values.
-		This is to allow the logic in check_and_fix_closepath() to work,
-		where the current or previous absolute point has to be compared to
-		the path start-point.
-		"""
-		self._p0 = pt
-		return list(self._p0)
-
 	def add_point(self, point_type, pt_coords):
 		if self.m_index == 0:
 			self._commands.append([point_type, [pt_coords]])
 		else:
 			cmd = self._commands[self.pt_index]
 			if cmd[0] != point_type:
-				# Fix some issues that show up in some
-				# CFF workflows, even when fonts are
-				# topologically merge compatible.
-				success, pt_coords = self.check_and_fix_flat_curve(
-							cmd, point_type, pt_coords)
-				if not success:
-					success = self.check_and_fix_closepath(
-							cmd, point_type, pt_coords)
-					if success:
-						# We may have incremented self.pt_index
-						cmd = self._commands[self.pt_index]
-						if cmd[0] != point_type:
-							success = False
-					if not success:
-						raise MergeTypeError(point_type,
-											 self.pt_index, len(cmd[1]),
-											 cmd[0], self.glyphName)
+				raise MergeTypeError(point_type,
+									 self.pt_index, len(cmd[1]),
+									 cmd[0], self.glyphName)
 			cmd[1].append(pt_coords)
 		self.pt_index += 1
+	
+	def _p(self, pt):
+		""" Unlike T2CharstringPen, this class stores absolute values.
+		"""
+		self._p0 = pt
+		return list(self._p0)
 
 	def _moveTo(self, pt):
 		pt_coords = self._p(pt)
