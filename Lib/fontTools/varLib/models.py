@@ -298,7 +298,9 @@ class VariationModel(object):
 
 			locAxes = set(loc.keys())
 			# Walk over previous masters now
-			for j,m in enumerate(locations[:i]):
+			for j,m in enumerate(locations):
+				if i == j:
+					continue
 				# Master with extra axes do not participte
 				if not set(m.keys()).issubset(locAxes):
 					continue
